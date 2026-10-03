@@ -1,0 +1,43 @@
+# Chess Supervised CNN Training Configuration
+
+model:
+  in_channels: 18
+  num_filters: 128       # Standard: 128 or 256 for large scale (e.g. 256 for 20M+ positions)
+  num_blocks: 6          # ResNet blocks: 6 for medium, 10-20 for master level
+  num_actions: 16384     # Full 64x64 move space + underpromotion planes
+  policy_head_filters: 32
+  value_head_filters: 4
+  value_hidden_dim: 256
+
+training:
+  batch_size: 256
+  learning_rate: 0.001
+  min_lr: 0.00001
+  weight_decay: 0.0001
+  epochs: 20
+  policy_weight: 1.0     # Loss weight for move policy
+  value_weight: 1.0      # Loss weight for game outcome
+  clip_grad_norm: 1.0    # Gradient clipping threshold
+  use_amp: true          # Automatic Mixed Precision (fp16 on CUDA)
+  num_workers: 4         # DataLoader workers (set to 0 for Windows if multiprocessing issues)
+  early_stopping_patience: 5
+  seed: 42
+
+data:
+  train_data_dir: "data/processed/train"
+  val_data_dir: "data/processed/val"
+  max_positions_per_shard: 50000
+  val_split: 0.1
+  canonical: true        # Rotate board so current player is always White (2x sample efficiency)
+
+health_checks:
+  overfit_test: true
+  gradient_flow_test: true
+  nan_inf_detection: true
+  max_loss_threshold: 50.0 # Stop training if loss diverges beyond this threshold
+
+output:
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+  best_model_name: "best_model.pt"
+  latest_model_name: "latest_model.pt"
