@@ -154,11 +154,13 @@ def run_overfit_capacity_check(model: nn.Module, device: torch.device, iteration
 
 
 class RuntimeHealthMonitor:
-    """Monitors live training health to abort immediately upon divergence or anomalies."""
+    """Monitors live training health to abort upon genuine divergence or anomalies."""
 
-    def __init__(self, max_loss_threshold: float = 50.0):
+    def __init__(self, max_loss_threshold: float = 50.0, max_consecutive_inf_grads: int = 5):
         self.max_loss_threshold = max_loss_threshold
+        self.max_consecutive_inf_grads = max_consecutive_inf_grads
         self.consecutive_nan_count = 0
+        self.consecutive_inf_grad_count = 0
 
     def check_step(self, step: int, loss_policy: float, loss_value: float, grad_norm: float):
         """Checks metric values of a single training step."""
@@ -166,7 +168,7 @@ class RuntimeHealthMonitor:
 
         if np.isnan(total_loss) or np.isinf(total_loss):
             self.consecutive_nan_count += 1
-            if self.consecutive_nan_count >= 1:
+            if self.consecutive_nan_count >= 3:
                 raise TrainingAnomalyError(
                     f"[CRITICAL ERROR] Training diverged at step {step}! Loss is NaN/Inf "
                     f"(Policy Loss: {loss_policy}, Value Loss: {loss_value}). Stopping training."
@@ -181,6 +183,11 @@ class RuntimeHealthMonitor:
             )
 
         if np.isnan(grad_norm) or np.isinf(grad_norm):
-            raise TrainingAnomalyError(
-                f"[CRITICAL ERROR] Gradient norm is NaN/Inf at step {step}."
-            )
+            self.consecutive_inf_grad_count += 1
+            if self.consecutive_inf_grad_count >= self.max_consecutive_inf_grads:
+                raise TrainingAnomalyError(
+                    f"[CRITICAL ERROR] Gradient norm remained NaN/Inf for "
+                    f"{self.consecutive_inf_grad_count} consecutive steps at step {step}."
+                )
+        else:
+            self.consecutive_inf_grad_count = 0

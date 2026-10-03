@@ -49,10 +49,21 @@ class ChessTrainer:
         self.clip_grad_norm = float(train_cfg.get("clip_grad_norm", 1.0))
         self.patience = int(train_cfg.get("early_stopping_patience", 5))
 
-        # Setup AMP scaler
+        # Setup AMP precision (Native BF16 on Ada Lovelace/Ampere; FP16 fallback)
         use_amp = train_cfg.get("use_amp", True) and (device.type == "cuda")
         self.use_amp = use_amp
-        self.scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+        if use_amp and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+            self.amp_dtype = torch.bfloat16
+            self.scaler = torch.amp.GradScaler("cuda", enabled=False)
+            self.precision_name = "bfloat16"
+        elif use_amp:
+            self.amp_dtype = torch.float16
+            self.scaler = torch.amp.GradScaler("cuda", enabled=True)
+            self.precision_name = "float16 (with GradScaler)"
+        else:
+            self.amp_dtype = torch.float32
+            self.scaler = torch.amp.GradScaler("cuda", enabled=False)
+            self.precision_name = "float32"
 
         # Loss functions
         self.criterion_policy = nn.CrossEntropyLoss()
@@ -139,29 +150,45 @@ class ChessTrainer:
 
             self.optimizer.zero_grad()
 
-            with torch.amp.autocast(device_type=self.device.type, enabled=self.use_amp):
+            with torch.amp.autocast(
+                device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp
+            ):
                 policy_logits, value_pred = self.model(boards)
                 loss_p = self.criterion_policy(policy_logits, target_moves)
                 loss_v = self.criterion_value(value_pred, target_values)
                 loss = (self.policy_weight * loss_p) + (self.value_weight * loss_v)
 
-            # Backward with AMP scaling
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.clip_grad_norm
-            ).item()
+            # Backward pass
+            if self.scaler.is_enabled():
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.clip_grad_norm
+                ).item()
 
-            # Health check on current step
-            self.health_monitor.check_step(
-                step=epoch * num_batches + step,
-                loss_policy=loss_p.item(),
-                loss_value=loss_v.item(),
-                grad_norm=grad_norm,
-            )
+                self.health_monitor.check_step(
+                    step=epoch * num_batches + step,
+                    loss_policy=loss_p.item(),
+                    loss_value=loss_v.item(),
+                    grad_norm=grad_norm,
+                )
 
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.clip_grad_norm
+                ).item()
+
+                self.health_monitor.check_step(
+                    step=epoch * num_batches + step,
+                    loss_policy=loss_p.item(),
+                    loss_value=loss_v.item(),
+                    grad_norm=grad_norm,
+                )
+
+                self.optimizer.step()
 
             # Track metrics
             top1, top5 = self._compute_accuracies(policy_logits, target_moves)
@@ -246,7 +273,7 @@ class ChessTrainer:
 
     def train(self) -> Dict[str, Any]:
         """Main training loop."""
-        print(f"\n[Training Started] Device: {self.device} | Epochs: {self.epochs} | Mixed-Precision: {self.use_amp}")
+        print(f"\n[Training Started] Device: {self.device} | Epochs: {self.epochs} | Precision: {self.precision_name}")
         print("-" * 90)
         print(
             f"{'Epoch':<6} | {'Tr Loss':<8} {'Tr P-Loss':<9} {'Tr Top1':<8} {'Tr Top5':<8} | "
