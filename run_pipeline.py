@@ -34,6 +34,7 @@ from src.dataset import (
     generate_synthetic_pgn,
     ShardedNpzChessDataset,
     InMemoryChessDataset,
+    ShardedBatchSampler,
 )
 from src.preprocess import preprocess_pgn_file
 from src.health_checks import (
@@ -125,8 +126,10 @@ def mode_verify(args):
     train_ds = ShardedNpzChessDataset(os.path.join(test_proc_dir, "train"))
     val_ds = ShardedNpzChessDataset(os.path.join(test_proc_dir, "val"))
 
-    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
+    train_sampler = ShardedBatchSampler(train_ds.cumulative_lengths, batch_size=32, shuffle=True)
+    val_sampler = ShardedBatchSampler(val_ds.cumulative_lengths, batch_size=32, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_sampler=train_sampler)
+    val_loader = DataLoader(val_ds, batch_sampler=val_sampler)
     print(f" -> DataLoaders active: Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
 
     print("\n" + "=" * 70)
@@ -231,23 +234,28 @@ def mode_train(args):
     val_ds = ShardedNpzChessDataset(val_data_dir) if os.path.exists(val_data_dir) else None
 
     batch_size = config.get("training", {}).get("batch_size", 256)
+    train_sampler = ShardedBatchSampler(train_ds.cumulative_lengths, batch_size=batch_size, shuffle=True)
+    val_sampler = (
+        ShardedBatchSampler(val_ds.cumulative_lengths, batch_size=batch_size, shuffle=False)
+        if val_ds
+        else None
+    )
+
     num_workers = config.get("training", {}).get("num_workers", 4)
-    # Windows compatibility check: if num_workers fails or on Windows, fallback cleanly
-    if sys.platform.startswith("win32"):
-        num_workers = min(num_workers, 2)
+    # On Windows or CPU, set num_workers=0 to eliminate multi-process RAM duplication
+    if device.type == "cpu" or sys.platform.startswith("win32"):
+        num_workers = 0
 
     train_loader = DataLoader(
         train_ds,
-        batch_size=batch_size,
-        shuffle=True,
+        batch_sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=(device.type == "cuda"),
     )
     val_loader = (
         DataLoader(
             val_ds,
-            batch_size=batch_size,
-            shuffle=False,
+            batch_sampler=val_sampler,
             num_workers=num_workers,
             pin_memory=(device.type == "cuda"),
         )

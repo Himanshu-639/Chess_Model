@@ -96,6 +96,17 @@ class TestChessPipeline(unittest.TestCase):
             self.assertIn(move, board.legal_moves)
             board.push(move)
 
+    def test_sharded_batch_sampler(self):
+        from src.dataset import ShardedBatchSampler
+        cumulative_lengths = np.array([100, 250, 400])
+        sampler = ShardedBatchSampler(cumulative_lengths, batch_size=32, shuffle=True)
+        batches = list(sampler)
+        self.assertTrue(len(batches) > 0)
+        # All indices must be within [0, 400)
+        all_indices = [idx for b in batches for idx in b]
+        self.assertEqual(len(all_indices), 400)
+        self.assertEqual(set(all_indices), set(range(400)))
+
 
 if __name__ == "__main__":
     unittest.main()
